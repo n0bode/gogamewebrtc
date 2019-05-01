@@ -111,7 +111,7 @@ func (sv *ServerRTC) setupPeerConnection(peer *webrtc.PeerConnection) webrtc.Ses
     return offer
 }
 
-func (sv *ServerRTC) Listen(config webrtc.Configuration, serverFileHandler http.HandlerFunc) error{
+func (sv *ServerRTC) Listen(configrtc webrtc.Configuration, serverFileHandler http.HandlerFunc) error{
     peersChan := make(chan *webrtc.PeerConnection, 100)
     handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request){
         switch r.URL.Path{
@@ -119,7 +119,7 @@ func (sv *ServerRTC) Listen(config webrtc.Configuration, serverFileHandler http.
                 w.Header().Set("application", "json")
                 w.Header().Set("charset", "utf-8")
 
-                peer, err := webrtc.NewPeerConnection(config)
+                peer, err := webrtc.NewPeerConnection(configrtc)
                 if err != nil{
                     log.Fatal(err)
                 }
