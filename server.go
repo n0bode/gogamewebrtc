@@ -1,10 +1,13 @@
 package main
 
 import (
+    "os"
     "log"
     "fmt"
     "flag"
+    "strings"
     "net/http"
+    "path/filepath"
     "encoding/json"
     "github.com/pion/webrtc"
 )
@@ -155,9 +158,18 @@ func NewServerRTC(address string) (*ServerRTC){
     return sv
 }
 
+func getPublicDir() string{
+    path, err := os.Executable()
+    if err != nil{
+        panic(err)
+    }
+    path = filepath.Dir(path)
+    return filepath.Join(path, "public", "/")
+}
+
 func main(){
-    host := flag.String("address", "localhost", "address")
-    port := flag.String("port", "1904", "port")
+    host := flag.String("address", "localhost", "Http server ip address")
+    port := flag.String("port", "1904", "Http server port")
     flag.Parse()
 
     address := fmt.Sprintf("%s:%s", *host, *port)
@@ -168,7 +180,15 @@ func main(){
         log.Print(string(data))
     })
 
-    if err := server.Listen(CONFIG, nil); err != nil{
+    pathHandler := http.FileServer(http.Dir(getPublicDir()))
+    publicHandler := http.HandlerFunc(func (w http.ResponseWriter, r *http.Request){
+        if strings.HasSuffix(r.URL.Path, ".wasm"){
+            w.Header().Set("content-type", "application/wasm")
+        }
+        pathHandler.ServeHTTP(w, r)
+    })
+
+    if err := server.Listen(CONFIG, publicHandler); err != nil{
         log.Fatal(err)
     }
 }
