@@ -1,14 +1,12 @@
 package main
 
 import (
-    "github.com/pion/webrtc"
-    "encoding/json"
-    "crypto/sha256"
-    "encoding/hex"
-    "net/http"
-    "flag"
-    "fmt"
     "log"
+    "fmt"
+    "flag"
+    "net/http"
+    "encoding/json"
+    "github.com/pion/webrtc"
 )
 
 var (
@@ -19,137 +17,158 @@ var (
             },
         },
     }
-    peers = make(map[uint]*webrtc.DataChannel)
-    uuid uint
 )
 
-
-type DataMessage struct{
-    UUID uint   `json:'uuid'`
-    Data []byte `json:'data'`
+type ChannelRTC struct{
+    channel *webrtc.DataChannel
 }
 
-func OnChannelOpen(channel *webrtc.DataChannel){
-    log.Printf("Channel '%s' is open\n", channel.Label())
+func (ch ChannelRTC) Label() string{
+    return ch.channel.Label()
 }
 
-func OnChannelMessage(channel *webrtc.DataChannel, msg webrtc.DataChannelMessage){
-    Broadcast(msg.Data)
+func (ch ChannelRTC) Close() error{
+    return ch.channel.Close()
 }
 
-func OnICECandidate(candidate *webrtc.ICECandidate){
-    if candidate != nil{
-        log.Println(candidate.String())
-    }
+func (ch ChannelRTC) ID() *uint16{
+    return ch.channel.ID()
 }
 
-func OnNewPeerConnection(peer *webrtc.PeerConnection){
-    log.Println("Create a new peer")
+func (ch ChannelRTC) Send(data []byte) error{
+    return ch.channel.Send(data)
 }
 
-func Broadcast(data []byte){
-    for _, channel := range peers{
-        channel.Send(data)
-    }
+func (ch ChannelRTC) SendText(txt string) error{
+    return ch.Send([]byte(txt))
 }
 
-func NewDataMessage(data []byte, uuid uint) DataMessage{
-    return DataMessage{uuid, data}
+type ServerRTC struct{
+    address string
+    offerChannel chan webrtc.SessionDescription
+
+    onNewPeerConnectionHandler func(*webrtc.PeerConnection)
+    onOpenChannelHandler func(*ChannelRTC)
+    onMessageHandler func([]byte)
 }
 
-func SetupChannel(channel *webrtc.DataChannel){
+func (sv *ServerRTC) OnOpenChannel(f func (*ChannelRTC)){
+    sv.onOpenChannelHandler = f
+}
+
+func (sv *ServerRTC) OnMessageChannel(f func([]byte)){
+    sv.onMessageHandler = f
+}
+
+func (sv *ServerRTC) OnNewPeerConnection(f func(*webrtc.PeerConnection)){
+    sv.onNewPeerConnectionHandler = f
+}
+
+func (sv *ServerRTC) Address() string{
+    return sv.address
+}
+
+func (sv *ServerRTC) setupChannel(channel *webrtc.DataChannel){
+    rtc := &ChannelRTC{channel}
+
     channel.OnOpen(func(){
-        OnChannelOpen(channel)
+        if sv.onOpenChannelHandler != nil{
+            sv.onOpenChannelHandler(rtc)
+        }
     })
 
     channel.OnMessage(func(msg webrtc.DataChannelMessage){
-        OnChannelMessage(channel, msg)
+        if sv.onMessageHandler != nil{
+            sv.onMessageHandler(msg.Data)
+        }
     })
 }
 
-func SetupPeerConnection(peer *webrtc.PeerConnection) webrtc.SessionDescription{
-    peer.OnICECandidate(OnICECandidate)
-    channel, err := peer.CreateDataChannel(ToHash(fmt.Sprintf("Channel%d", uuid)), nil)
+func (sv *ServerRTC) setupPeerConnection(peer *webrtc.PeerConnection) webrtc.SessionDescription{
+    peer.OnICECandidate(func(candidate *webrtc.ICECandidate){
+        if candidate != nil{
+            log.Println(candidate)
+        }
+    })
+
+    channel, err := peer.CreateDataChannel("newbee", nil)
     if err != nil{
         log.Fatal(err)
     }
-    SetupChannel(channel)
-    peers[uuid] = channel
+    sv.setupChannel(channel)
 
     offer, err := peer.CreateOffer(nil)
     if err != nil{
         log.Fatal(err)
     }
+
     if err = peer.SetLocalDescription(offer); err != nil{
         log.Fatal(err)
     }
     return offer
 }
 
-func ListenHttp(address string, offerChan, answerChan chan webrtc.SessionDescription){
-    peerChan := make(chan *webrtc.PeerConnection, 10)
+func (sv *ServerRTC) Listen(config webrtc.Configuration, serverFileHandler http.HandlerFunc) error{
+    peersChan := make(chan *webrtc.PeerConnection, 100)
+    handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request){
+        switch r.URL.Path{
+            case "/newpeer":
+                w.Header().Set("application", "json")
+                w.Header().Set("charset", "utf-8")
 
-    http.HandleFunc("/newpeer", func(w http.ResponseWriter, r *http.Request){
-        peer, err := webrtc.NewPeerConnection(CONFIG)
-        if err != nil{
-            log.Fatal(err)
-        }
-        uuid++
-        offer := SetupPeerConnection(peer)
-        offerChan <- offer
-        peerChan <- peer
-        OnNewPeerConnection(peer)
-    })
-
-    http.HandleFunc("/offer", func(w http.ResponseWriter, r *http.Request){
-        w.Header().Set("application", "json")
-        w.Header().Set("charset", "utf-8")
-
-        select{
-            case offer := <-offerChan:
-                if err := json.NewEncoder(w).Encode(offer); err != nil{
+                peer, err := webrtc.NewPeerConnection(config)
+                if err != nil{
                     log.Fatal(err)
                 }
-            default:
-                w.Write([]byte("There's no peerconnection"))
-       }
-    })
-
-    http.HandleFunc("/answer", func(w http.ResponseWriter, r *http.Request){
-        if r.Method == "POST"{
-            var answer webrtc.SessionDescription
-            if err := json.NewDecoder(r.Body).Decode(&answer); err != nil{
-                log.Fatal(err)
-            }
-            answerChan <- answer
-            peer := <-peerChan
-            peer.SetRemoteDescription(answer)
-            log.Println("Post ANSWER")
-        }else{
-            w.Write([]byte("You Cannot Access this Area 51"))
+                offer := sv.setupPeerConnection(peer)
+                if err = json.NewEncoder(w).Encode(offer); err != nil{
+                    log.Fatal(err)
+                }
+                peersChan <- peer
+                break
+          case "/answer":
+                if r.Method == "POST"{
+                    var answer webrtc.SessionDescription
+                    if err := json.NewDecoder(r.Body).Decode(&answer); err != nil{
+                        log.Fatal(err)
+                    }
+                    select{
+                        case peer := <-peersChan:
+                            peer.SetRemoteDescription(answer)
+                    }
+                }else{
+                    w.Write([]byte("Cannot access this area 51"))
+                }
+                break
+           default:
+                if serverFileHandler != nil{
+                    serverFileHandler(w, r)
+                }
         }
     })
-
-    go func(){
-        if err := http.ListenAndServe(address, nil); err != nil{
-            log.Fatal(err)
-        }
-    }()
+    return http.ListenAndServe(sv.Address(), handler)
 }
 
-func ToHash(val string) string{
-    data := sha256.Sum256([]byte(val))
-    return hex.EncodeToString(data[:])
+func NewServerRTC(address string) (*ServerRTC){
+    sv := new(ServerRTC)
+    sv.address = address
+    return sv
 }
 
 func main(){
-    port := flag.String("port", "1904", "Http Port")
-    host := flag.String("host", "localhost", "Http Host Address")
-    address := fmt.Sprintf("%s:%s", *host, *port)
-    answerChan := make(chan webrtc.SessionDescription, 10)
-    offerChan := make(chan webrtc.SessionDescription, 10)
+    host := flag.String("address", "localhost", "address")
+    port := flag.String("port", "1904", "port")
+    flag.Parse()
 
-    log.Printf("Http Server started on %s\n", address)
-    ListenHttp(address, offerChan, answerChan)
-    select{}
+    address := fmt.Sprintf("%s:%s", *host, *port)
+    log.Printf("Started Http Server on %s\n", address)
+
+    server := NewServerRTC(address)
+    server.OnMessageChannel(func(data []byte){
+        log.Print(string(data))
+    })
+
+    if err := server.Listen(CONFIG, nil); err != nil{
+        log.Fatal(err)
+    }
 }
