@@ -7,8 +7,10 @@ import (
     "flag"
     "strings"
     "net/http"
-    "path/filepath"
+    "encoding/hex"
+    "crypto/sha256"
     "encoding/json"
+    "path/filepath"
     "github.com/pion/webrtc"
 )
 
@@ -21,6 +23,11 @@ var (
         },
     }
 )
+
+type DescriptionRTC struct{
+    ID uint64 `json:"id"`
+    Description webrtc.SessionDescription `json:"description"`
+}
 
 type ChannelRTC struct{
     channel *webrtc.DataChannel
@@ -49,6 +56,8 @@ func (ch ChannelRTC) SendText(txt string) error{
 type ServerRTC struct{
     address string
     offerChannel chan webrtc.SessionDescription
+    channels map[string]*webrtc.DataChannel
+    lastPeerID uint64
 
     onNewPeerConnectionHandler func(*webrtc.PeerConnection)
     onOpenChannelHandler func(*ChannelRTC)
@@ -123,24 +132,34 @@ func (sv *ServerRTC) Listen(configrtc webrtc.Configuration, serverFileHandler ht
                 if err != nil{
                     log.Fatal(err)
                 }
-                offer := sv.setupPeerConnection(peer)
+                sv.lastPeerID += 1
+                offer := DescriptionRTC{sv.lastPeerID, sv.setupPeerConnection(peer)}
                 if err = json.NewEncoder(w).Encode(offer); err != nil{
                     log.Fatal(err)
                 }
                 peersChan <- peer
+                log.Println("New PeerConnection created")
                 break
           case "/answer":
                 if r.Method == "POST"{
-                    var answer webrtc.SessionDescription
-                    if err := json.NewDecoder(r.Body).Decode(&answer); err != nil{
-                        log.Fatal(err)
+                    var desc DescriptionRTC
+                    if err := json.NewDecoder(r.Body).Decode(&desc); err != nil{
+                        log.Println("Invalid SDP session description")
+                        return
                     }
                     select{
                         case peer := <-peersChan:
-                            peer.SetRemoteDescription(answer)
+                            peer.SetRemoteDescription(desc.Description)
+                            log.Println("Anwser Received")
+                            break
                     }
                 }else{
                     w.Write([]byte("Cannot access this area 51"))
+                }
+                break
+           case "/rtcconfiguration":
+                if err := json.NewEncoder(w).Encode(CONFIG); err != nil{
+                    log.Println("config")
                 }
                 break
            default:
@@ -155,7 +174,13 @@ func (sv *ServerRTC) Listen(configrtc webrtc.Configuration, serverFileHandler ht
 func NewServerRTC(address string) (*ServerRTC){
     sv := new(ServerRTC)
     sv.address = address
+    sv.channels = make(map[string]*webrtc.DataChannel)
     return sv
+}
+
+func toHash(data string) string{
+    buffer := sha256.Sum256([]byte(data))
+    return hex.EncodeToString(buffer[:])
 }
 
 func getPublicDir() string{
