@@ -56,7 +56,7 @@ func (ch ChannelRTC) SendText(txt string) error{
 type ServerRTC struct{
     address string
     offerChannel chan webrtc.SessionDescription
-    channels map[string]*webrtc.DataChannel
+    channels map[uint64]*webrtc.DataChannel
     lastPeerID uint64
 
     onNewPeerConnectionHandler func(*webrtc.PeerConnection)
@@ -80,6 +80,20 @@ func (sv *ServerRTC) Address() string{
     return sv.address
 }
 
+func (sv *ServerRTC) Broadcast(data []byte){
+    fmt.Println(string(data))
+    fmt.Println(len(sv.channels))
+    for _, channel := range sv.channels{
+        channel.Send(data)
+    }
+}
+
+func (sv *ServerRTC) Send(peerID uint64,data []byte){
+    if v, ok := sv.channels[peerID]; ok{
+        v.Send(data)
+    }
+}
+
 func (sv *ServerRTC) setupChannel(channel *webrtc.DataChannel){
     rtc := &ChannelRTC{channel}
 
@@ -96,7 +110,7 @@ func (sv *ServerRTC) setupChannel(channel *webrtc.DataChannel){
     })
 }
 
-func (sv *ServerRTC) setupPeerConnection(peer *webrtc.PeerConnection) webrtc.SessionDescription{
+func (sv *ServerRTC) setupPeerConnection(peer *webrtc.PeerConnection, peerID uint64) webrtc.SessionDescription{
     peer.OnICECandidate(func(candidate *webrtc.ICECandidate){
         if candidate != nil{
             log.Println(candidate)
@@ -108,6 +122,7 @@ func (sv *ServerRTC) setupPeerConnection(peer *webrtc.PeerConnection) webrtc.Ses
         log.Fatal(err)
     }
     sv.setupChannel(channel)
+    sv.channels[peerID] = channel
 
     offer, err := peer.CreateOffer(nil)
     if err != nil{
@@ -133,7 +148,7 @@ func (sv *ServerRTC) Listen(configrtc webrtc.Configuration, serverFileHandler ht
                     log.Fatal(err)
                 }
                 sv.lastPeerID += 1
-                offer := DescriptionRTC{sv.lastPeerID, sv.setupPeerConnection(peer)}
+                offer := DescriptionRTC{sv.lastPeerID, sv.setupPeerConnection(peer, sv.lastPeerID)}
                 if err = json.NewEncoder(w).Encode(offer); err != nil{
                     log.Fatal(err)
                 }
@@ -174,7 +189,7 @@ func (sv *ServerRTC) Listen(configrtc webrtc.Configuration, serverFileHandler ht
 func NewServerRTC(address string) (*ServerRTC){
     sv := new(ServerRTC)
     sv.address = address
-    sv.channels = make(map[string]*webrtc.DataChannel)
+    sv.channels = make(map[uint64]*webrtc.DataChannel)
     return sv
 }
 
@@ -202,7 +217,8 @@ func main(){
 
     server := NewServerRTC(address)
     server.OnMessageChannel(func(data []byte){
-        log.Print(string(data))
+        fmt.Println(string(data))
+        server.Broadcast(data)
     })
 
     pathHandler := http.FileServer(http.Dir(getPublicDir()))
@@ -212,8 +228,17 @@ func main(){
         }
         pathHandler.ServeHTTP(w, r)
     })
+    
+    go func(){
+        if err := server.Listen(CONFIG, publicHandler); err != nil{
+            log.Fatal(err)
+        }
+    }()
 
-    if err := server.Listen(CONFIG, publicHandler); err != nil{
-        log.Fatal(err)
+    for{
+        var input string
+        fmt.Print(">>")
+        fmt.Scanln(&input)
+        server.Broadcast([]byte(input))
     }
 }
